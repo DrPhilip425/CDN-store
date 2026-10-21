@@ -3,6 +3,16 @@ on:
     schedule:
         - cron: "0 0 * * *"
     workflow_dispatch:
+
+# 用仓库内置 token，推回 main 需要写权限
+permissions:
+    contents: write
+
+# 避免两次运行互相踩
+concurrency:
+    group: sync
+    cancel-in-progress: false
+
 jobs:
     sync:
         runs-on: ubuntu-latest
@@ -10,7 +20,7 @@ jobs:
             - name: clone
               run: |
                   git clone https://github.com/cdnjs/cdnjs.git --depth=1 --filter=blob:none --no-checkout
-                  git clone https://${{ secrets.TOKEN }}@github.com/${{ github.repository }}.git static --depth=1 --filter=blob:none --no-checkout
+                  git clone https://github.com/${{ github.repository }}.git static --depth=1 --filter=blob:none --no-checkout
             - name: checkout
               run: |
                   cd cdnjs
@@ -36,6 +46,23 @@ jobs:
                   git add .
                   git commit --allow-empty -m "chore: sync libs"
             - name: push
+              env:
+                  TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   cd static
-                  git push https://${{ secrets.TOKEN }}@github.com/${{ github.repository }}.git
+                  # token 为空时立刻报明确错误，而不是含糊的 exit code 1
+                  test -n "$TOKEN" || { echo "::error::GITHUB_TOKEN 为空"; exit 1; }
+
+                  # 凭据放在 header 里而不是 URL 里：即使 GitHub 返回 301 跳转也不会丢
+                  AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+
+                  for i in 1 2 3; do
+                    if git -c http.https://github.com/.extraheader="$AUTH" push origin HEAD:main; then
+                      echo "push 成功（第 $i 次尝试）"
+                      exit 0
+                    fi
+                    echo "push 失败（第 $i 次），15 秒后重试"
+                    sleep 15
+                  done
+                  echo "::error::push 连续 3 次失败，请看上面的报错"
+                  exit 1
